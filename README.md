@@ -1,7 +1,9 @@
 # Smart Multi-Sensor Security & Environment Monitoring System
 
 ## Overview
-This project is an Arduino-based smart home security and environmental monitoring system designed using multiple sensors and alert mechanisms. The system detects motion, vibration, environmental conditions, and abnormal activities using a combination of sensors and output devices.
+This project is an Arduino-based smart home security and environmental monitoring system designed using multiple sensors and alert mechanisms. The system detects motion, vibration, environmental conditions, and abnormal activities using a combination of sensors and output devices.## Project Preview
+
+![Project Image]()
 
 ## Features
 - PIR motion detection
