@@ -39,6 +39,16 @@ The system continuously monitors motion, vibration, temperature, humidity, and l
 - Restricted Area Protection
 - Smart Environment Monitoring
 
+
+## Firmware Architecture
+
+- **Non-blocking timing** — All sensor polling and alert durations use `millis()`-based intervals instead of `delay()`, keeping the main loop responsive at all times
+- **Finite State Machine** — System operates across three defined states: `NORMAL`, `ALERT`, and `COOLDOWN`, with explicit transition logic preventing false re-triggers
+- **LDR Night Mode** — Light intensity reading from LDR dynamically adjusts PIR sensitivity threshold; motion alerts suppress automatically in low-light conditions to reduce false positives
+- **MPU6050 tamper detection** — Accelerometer data is read over I2C and compared against a calibrated vibration threshold; sustained vibration triggers a separate tamper alert distinct from motion
+- **Sensor abstraction** — DHT22 temperature/humidity, PIR, LDR, and MPU6050 are each polled on independent `millis()` intervals (500ms, 100ms, 1s, 200ms respectively), preventing one slow sensor from blocking others
+
+
 ## Future Improvements
 - IoT cloud integration
 - Mobile app notifications
