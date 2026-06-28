@@ -6,6 +6,7 @@ This project is an Arduino-based smart home security and environmental monitorin
 
 ![Project Image](https://github.com/satvikshrivastava-coder/smart-multi-sensor-security-system/blob/main/Screenshot%202026-05-11%20173257.png)
 
+
 ## Features
 - PIR motion detection
 - MPU6050 vibration/tamper detection
