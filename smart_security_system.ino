@@ -4,237 +4,200 @@
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 
-// ================= LCD =================
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// ================= DHT =================
 #define DHTPIN 7
 #define DHTTYPE DHT22
 DHT dht(DHTPIN, DHTTYPE);
 
-// ================= PINS =================
-#define PIR_PIN    2
-#define LDR_PIN    A0
-#define GREEN_LED  9
-#define RED_LED    8
-#define BUZZER     4
+#define PIR_PIN 2
+#define LDR_PIN A0
+#define GREEN_LED 9
+#define RED_LED 8
+#define BUZZER 4
 
-// ================= MPU6050 =================
 Adafruit_MPU6050 mpu;
-const float MOTION_THRESHOLD = 1.0; // G-force threshold for tamper detection
 
-// ================= STATE MACHINE =================
-// Three states: NORMAL → ALERT → COOLDOWN → NORMAL
-enum SystemState { NORMAL, ALERT, COOLDOWN };
-SystemState currentState = NORMAL;
+const float MOTION_THRESHOLD = 1.0;
+const int DARK_THRESHOLD = 500;
+const unsigned long SENSOR_INTERVAL = 1000;
 
-// ================= TIMING (millis-based, no delay) =================
-// Each sensor has its own independent poll interval
-unsigned long lastPIRCheck     = 0;  const unsigned long PIR_INTERVAL     = 100;   // ms
-unsigned long lastLDRCheck     = 0;  const unsigned long LDR_INTERVAL     = 1000;  // ms
-unsigned long lastDHTCheck     = 0;  const unsigned long DHT_INTERVAL     = 2000;  // ms
-unsigned long lastMPUCheck     = 0;  const unsigned long MPU_INTERVAL     = 200;   // ms
-unsigned long lastLCDUpdate    = 0;  const unsigned long LCD_INTERVAL     = 500;   // ms
-unsigned long lastSerialPrint  = 0;  const unsigned long SERIAL_INTERVAL  = 1000;  // ms
+unsigned long lastSensorRead = 0;
 
-// Alert holds for 5 seconds after trigger clears (prevents buzzer stutter)
-unsigned long alertStartTime   = 0;  const unsigned long ALERT_HOLD       = 5000;  // ms
-// Cooldown period before system re-arms (prevents immediate re-trigger)
-unsigned long cooldownStart    = 0;  const unsigned long COOLDOWN_PERIOD  = 3000;  // ms
+String lastLCDLine0 = "";
+String lastLCDLine1 = "";
 
-// ================= SENSOR STATE VARIABLES =================
-int   pirState   = LOW;
-int   lightValue = 1023;  // default: bright (safe)
-float temp       = 0.0;
-float hum        = 0.0;
-float ax         = 0.0;
-float ay         = 0.0;
+enum SystemState {
+  SAFE,
+  NIGHT_MODE,
+  MOTION_ALERT,
+  TAMPER_ALERT,
+  MOTION_TAMPER_ALERT
+};
 
-bool  mpuAlert   = false;
-bool  nightMode  = false;  // true when LDR reads dark (lightValue < 500)
+SystemState currentState = SAFE;
 
-// ================= SETUP =================
+volatile bool motionDetectedFlag = false;
+
+void motionISR() {
+  motionDetectedFlag = true;
+}
+
+void updateLCD(String line0, String line1) {
+  if (line0 != lastLCDLine0 || line1 != lastLCDLine1) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(line0);
+    lcd.setCursor(0, 1);
+    lcd.print(line1);
+    lastLCDLine0 = line0;
+    lastLCDLine1 = line1;
+  }
+}
+
+void applyState(SystemState state, float temp, float hum) {
+  switch (state) {
+    case SAFE:
+      digitalWrite(GREEN_LED, HIGH);
+      digitalWrite(RED_LED, LOW);
+      digitalWrite(BUZZER, LOW);
+      updateLCD("SAFE MODE", "T:" + String(temp, 1) + "C H:" + String(hum, 0));
+      break;
+
+    case NIGHT_MODE:
+      digitalWrite(GREEN_LED, LOW);
+      digitalWrite(RED_LED, LOW);
+      digitalWrite(BUZZER, LOW);
+      updateLCD("NIGHT MODE", "T:" + String(temp, 1) + "C H:" + String(hum, 0));
+      break;
+
+    case MOTION_ALERT:
+      digitalWrite(RED_LED, HIGH);
+      digitalWrite(BUZZER, HIGH);
+      digitalWrite(GREEN_LED, LOW);
+      updateLCD("MOTION ALERT!", "Security Risk");
+      break;
+
+    case TAMPER_ALERT:
+      digitalWrite(RED_LED, HIGH);
+      digitalWrite(BUZZER, HIGH);
+      digitalWrite(GREEN_LED, LOW);
+      updateLCD("TAMPER ALERT!", "Security Risk");
+      break;
+
+    case MOTION_TAMPER_ALERT:
+      digitalWrite(RED_LED, HIGH);
+      digitalWrite(BUZZER, HIGH);
+      digitalWrite(GREEN_LED, LOW);
+      updateLCD("MOTION+TAMPER!", "Security Risk");
+      break;
+  }
+}
+
 void setup() {
   Serial.begin(9600);
 
-  // LCD
   lcd.init();
   lcd.backlight();
-  lcd.setCursor(0, 0); lcd.print("System Starting");
-  lcd.setCursor(0, 1); lcd.print("Please Wait...");
-  delay(2000); // only delay allowed: boot splash, before loop starts
+  lcd.setCursor(0, 0);
+  lcd.print("System Starting");
+  lcd.setCursor(0, 1);
+  lcd.print("Please Wait...");
+  delay(2000);
 
-  // Sensors
   dht.begin();
+
   pinMode(PIR_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(PIR_PIN), motionISR, RISING);
+
   pinMode(GREEN_LED, OUTPUT);
-  pinMode(RED_LED,   OUTPUT);
-  pinMode(BUZZER,    OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
 
-  // Safe default output state
   digitalWrite(GREEN_LED, HIGH);
-  digitalWrite(RED_LED,   LOW);
-  digitalWrite(BUZZER,    LOW);
+  digitalWrite(RED_LED, LOW);
+  digitalWrite(BUZZER, LOW);
 
-  // MPU6050
   if (!mpu.begin()) {
     lcd.clear();
-    lcd.setCursor(0, 0); lcd.print("MPU6050 ERROR");
-    while (1); // halt — sensor is critical
+    lcd.setCursor(0, 0);
+    lcd.print("MPU6050 ERROR");
+    while (1);
   }
+
   mpu.setAccelerometerRange(MPU6050_RANGE_2_G);
   mpu.setGyroRange(MPU6050_RANGE_250_DEG);
   mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
 
   lcd.clear();
-  lcd.setCursor(0, 0); lcd.print("System Ready");
-  lcd.setCursor(0, 1); lcd.print("Monitoring...");
-  delay(1000);
-  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("System Ready");
+  lcd.setCursor(0, 1);
+  lcd.print("Monitoring...");
+  delay(2000);
 }
 
-// ================= MAIN LOOP =================
 void loop() {
-  unsigned long now = millis();
-
-  // ---- 1. POLL SENSORS (each on its own interval) ----
-
-  // PIR: check every 100ms
-  if (now - lastPIRCheck >= PIR_INTERVAL) {
-    lastPIRCheck = now;
-    pirState = digitalRead(PIR_PIN);
+  if (motionDetectedFlag && currentState != MOTION_ALERT && currentState != MOTION_TAMPER_ALERT) {
+    currentState = MOTION_ALERT;
+    applyState(currentState, 0.0, 0.0);
+    Serial.println(">>> INTERRUPT: MOTION DETECTED <<<");
   }
 
-  // LDR: check every 1000ms — also sets nightMode flag
-  if (now - lastLDRCheck >= LDR_INTERVAL) {
-    lastLDRCheck = now;
-    lightValue = analogRead(LDR_PIN);
-    // nightMode = true when light level is low (dark environment)
-    // In night mode, PIR alerts are suppressed to reduce false positives
-    nightMode = (lightValue < 500);
-  }
+  unsigned long currentTime = millis();
 
-  // DHT22: check every 2000ms (sensor hardware limit is ~0.5Hz)
-  if (now - lastDHTCheck >= DHT_INTERVAL) {
-    lastDHTCheck = now;
-    float newTemp = dht.readTemperature();
-    float newHum  = dht.readHumidity();
-    // Only update if reading is valid (DHT returns NaN on failure)
-    if (!isnan(newTemp)) temp = newTemp;
-    if (!isnan(newHum))  hum  = newHum;
-  }
+  if (currentTime - lastSensorRead >= SENSOR_INTERVAL) {
+    lastSensorRead = currentTime;
 
-  // MPU6050: check every 200ms
-  if (now - lastMPUCheck >= MPU_INTERVAL) {
-    lastMPUCheck = now;
+    int lightValue = analogRead(LDR_PIN);
+    float temp = dht.readTemperature();
+    float hum = dht.readHumidity();
+
+    if (isnan(temp) || isnan(hum)) {
+      Serial.println("DHT22 READ FAILED - skipping cycle");
+      return;
+    }
+
     sensors_event_t a, g, tempSensor;
     mpu.getEvent(&a, &g, &tempSensor);
-    ax = abs(a.acceleration.x / 9.8);
-    ay = abs(a.acceleration.y / 9.8);
-    mpuAlert = (ax >= MOTION_THRESHOLD || ay >= MOTION_THRESHOLD);
-  }
 
-  // ---- 2. STATE MACHINE ----
+    float ax = abs(a.acceleration.x / 9.8);
+    float ay = abs(a.acceleration.y / 9.8);
 
-  switch (currentState) {
+    bool pirTriggered = motionDetectedFlag || (digitalRead(PIR_PIN) == HIGH);
+    motionDetectedFlag = false;
 
-    case NORMAL:
-      // PIR alert is suppressed in night mode (LDR-based suppression)
-      // MPU tamper alert always active regardless of light level
-      if (mpuAlert || (!nightMode && pirState == HIGH)) {
-        currentState   = ALERT;
-        alertStartTime = now;
-      }
-      break;
+    bool tamperTriggered = (ax >= MOTION_THRESHOLD || ay >= MOTION_THRESHOLD);
+    bool nightMode = (lightValue < DARK_THRESHOLD);
 
-    case ALERT:
-      // Hold alert for ALERT_HOLD ms after trigger clears (no buzzer stutter)
-      if (!mpuAlert && pirState == LOW) {
-        // Trigger has cleared — check if hold time has elapsed
-        if (now - alertStartTime >= ALERT_HOLD) {
-          currentState  = COOLDOWN;
-          cooldownStart = now;
-        }
-      } else {
-        // Trigger still active — reset the hold timer
-        alertStartTime = now;
-      }
-      break;
-
-    case COOLDOWN:
-      // System re-arms after COOLDOWN_PERIOD ms — prevents immediate re-trigger
-      if (now - cooldownStart >= COOLDOWN_PERIOD) {
-        currentState = NORMAL;
-      }
-      break;
-  }
-
-  // ---- 3. OUTPUT CONTROL (driven by state, not raw sensor reads) ----
-
-  if (currentState == ALERT) {
-    digitalWrite(RED_LED,   HIGH);
-    digitalWrite(BUZZER,    HIGH);
-    digitalWrite(GREEN_LED, LOW);
-  } else {
-    // NORMAL and COOLDOWN both show safe outputs
-    digitalWrite(RED_LED,   LOW);
-    digitalWrite(BUZZER,    LOW);
-    // During cooldown blink green LED to show system is re-arming
-    if (currentState == COOLDOWN) {
-      digitalWrite(GREEN_LED, (now / 500) % 2); // blink every 500ms
+    if (pirTriggered && tamperTriggered) {
+      currentState = MOTION_TAMPER_ALERT;
+    } else if (pirTriggered) {
+      currentState = MOTION_ALERT;
+    } else if (tamperTriggered) {
+      currentState = TAMPER_ALERT;
+    } else if (nightMode) {
+      currentState = NIGHT_MODE;
     } else {
-      digitalWrite(GREEN_LED, HIGH);
+      currentState = SAFE;
     }
-  }
 
-  // ---- 4. LCD UPDATE (every 500ms, non-blocking) ----
+    applyState(currentState, temp, hum);
 
-  if (now - lastLCDUpdate >= LCD_INTERVAL) {
-    lastLCDUpdate = now;
-    lcd.clear();
-
-    if (currentState == ALERT) {
-      lcd.setCursor(0, 0);
-      // Tamper alert takes priority over motion alert on display
-      if (mpuAlert)           lcd.print("TAMPER ALERT!");
-      else if (pirState == HIGH) lcd.print("MOTION ALERT!");
-      lcd.setCursor(0, 1);    lcd.print("Security Risk!");
-
-    } else if (currentState == COOLDOWN) {
-      lcd.setCursor(0, 0); lcd.print("Re-Arming...");
-      lcd.setCursor(0, 1); lcd.print("Please Wait");
-
-    } else {
-      // NORMAL state — show environment data
-      lcd.setCursor(0, 0);
-      if (nightMode) lcd.print("Night Mode ON");
-      else           lcd.print("SAFE MODE");
-
-      lcd.setCursor(0, 1);
-      lcd.print("T:");  lcd.print(temp, 1);
-      lcd.print("C H:"); lcd.print(hum, 0);
-      lcd.print("%");
+    Serial.print("State: ");
+    switch (currentState) {
+      case SAFE:                Serial.print("SAFE"); break;
+      case NIGHT_MODE:          Serial.print("NIGHT_MODE"); break;
+      case MOTION_ALERT:        Serial.print("MOTION_ALERT"); break;
+      case TAMPER_ALERT:        Serial.print("TAMPER_ALERT"); break;
+      case MOTION_TAMPER_ALERT: Serial.print("MOTION_TAMPER_ALERT"); break;
     }
-  }
 
-  // ---- 5. SERIAL MONITOR (every 1000ms, non-blocking) ----
-
-  if (now - lastSerialPrint >= SERIAL_INTERVAL) {
-    lastSerialPrint = now;
-
-    // State label for serial readability
-    const char* stateLabel = (currentState == NORMAL)   ? "NORMAL"   :
-                             (currentState == ALERT)    ? "ALERT"    : "COOLDOWN";
-
-    Serial.print("State: ");    Serial.print(stateLabel);
     Serial.print(" | Light: "); Serial.print(lightValue);
-    Serial.print(" Night: ");   Serial.print(nightMode ? "YES" : "NO");
-    Serial.print(" | PIR: ");   Serial.print(pirState);
-    Serial.print(" | Temp: ");  Serial.print(temp, 1);
-    Serial.print("C Hum: ");    Serial.print(hum, 0);
-    Serial.print("% | AX: ");   Serial.print(ax, 2);
-    Serial.print(" AY: ");      Serial.println(ay, 2);
+    Serial.print(" | PIR: "); Serial.print(pirTriggered);
+    Serial.print(" | Temp: "); Serial.print(temp);
+    Serial.print(" | Hum: "); Serial.print(hum);
+    Serial.print(" | AX: "); Serial.print(ax);
+    Serial.print(" | AY: "); Serial.println(ay);
   }
-
-  // No delay() here — loop runs freely, timing handled entirely by millis()
 }
